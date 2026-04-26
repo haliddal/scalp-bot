@@ -161,9 +161,7 @@ async def handle_signal(signal: dict):
     log.info(f"📊 Toplam:{stats['total']} Kazanç:{stats['wins']} Kayıp:{stats['losses']} Winrate:%{winrate()} Açık:{len(open_trades)}")
 
 async def webhook_handler(request: web.Request):
-    secret = request.headers.get("X-Webhook-Secret", "")
-    if secret != WEBHOOK_SECRET:
-        return web.Response(status=403, text="Forbidden")
+    
     try:
         body = await request.json()
     except:
