@@ -131,8 +131,8 @@ async def handle_signal(signal: dict):
     sl_price = float(signal.get("sl", 0))
     tp_price = float(signal.get("tp", 0))
     symbol = raw_sym.upper().replace(".PUSDT", "USDT").replace(".P", "")
-if not symbol.endswith("USDT"):
-    symbol = symbol + "USDT"
+    if not symbol.endswith("USDT"):
+        symbol = symbol + "USDT"
 
     log.info(f"📡 Sinyal → {action} {symbol} TF={tf}")
 
