@@ -77,7 +77,10 @@ async def get_price(symbol: str) -> float:
     async with aiohttp.ClientSession() as s:
         async with s.get(f"{BASE}/api/v1/contract/ticker", params={"symbol": symbol}) as r:
             d = await r.json()
-            return float(d["data"]["lastPrice"])
+            data = d.get("data", {})
+            if isinstance(data, list):
+                return float(data[0]["lastPrice"])
+            return float(data["lastPrice"])
 
 async def set_leverage(symbol: str):
     await futures_post("/api/v1/private/position/change_leverage", {
