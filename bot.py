@@ -80,7 +80,10 @@ async def get_price(symbol: str) -> float:
             data = d.get("data", {})
             if isinstance(data, list):
                 return float(data[0]["lastPrice"])
-            return float(data["lastPrice"])
+            price_key = next((k for k in ["lastPrice", "last", "price", "close"] if k in data), None)
+            if not price_key:
+                raise KeyError(f"Price key not found: {list(data.keys())}")
+            return float(data[price_key])
 
 async def set_leverage(symbol: str):
     await futures_post("/api/v1/private/position/change_leverage", {
