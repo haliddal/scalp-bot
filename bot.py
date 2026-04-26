@@ -3,8 +3,9 @@ from datetime import datetime
 from aiohttp import web
 import aiohttp
 
-MEXC_API_KEY    = "mx0vgl61lOYkB3ei2l"
-MEXC_SECRET_KEY = "b768fe4cbb4e4b8a908fb5de8b8d6d93"
+import os
+MEXC_API_KEY    = os.environ.get("MEXC_API_KEY", "")
+MEXC_SECRET_KEY = os.environ.get("MEXC_SECRET_KEY", "")
 WEBHOOK_PORT    = 8080
 WEBHOOK_SECRET  = "scalp2025"
 LEVERAGE        = 15
