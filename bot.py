@@ -49,7 +49,9 @@ async def futures_post(path: str, body: dict) -> dict:
     }
     async with aiohttp.ClientSession() as s:
         async with s.post(BASE + path, json=body, headers=headers) as r:
-            return await r.json()
+                text = await r.text()
+                print("MEXC RESPONSE:", text)
+                return json.loads(text)
 
 async def futures_get(path: str, params: dict = None) -> dict:
     params = params or {}
