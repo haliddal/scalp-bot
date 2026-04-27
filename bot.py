@@ -39,7 +39,7 @@ BASE = "https://contract.mexc.com"
 
 async def futures_post(path: str, body: dict) -> dict:
     ts = str(int(time.time() * 1000))
-    sign_str = MEXC_API_KEY + ts + json.dumps(body)
+    sign_str = ts + MEXC_API_KEY + json.dumps(body)
     signature = hmac.new(MEXC_SECRET_KEY.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
     headers = {
         "ApiKey": MEXC_API_KEY,
