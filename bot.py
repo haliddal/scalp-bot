@@ -85,7 +85,8 @@ async def get_price(symbol: str) -> float:
                         return float(t["lastPrice"])
             elif isinstance(tickers, dict):
                 return float(tickers["lastPrice"])
-            raise KeyError(f"Symbol {symbol} not found in ticker")
+            symbols_in_ticker = [t.get("symbol") for t in tickers[:5]] if isinstance(tickers, list) else tickers
+            raise KeyError(f"Symbol {symbol} not found. Available: {symbols_in_ticker}")
 
 async def set_leverage(symbol: str):
     await futures_post("/api/v1/private/position/change_leverage", {
