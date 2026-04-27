@@ -81,7 +81,7 @@ async def get_price(symbol: str) -> float:
             tickers = d.get("data", [])
             if isinstance(tickers, list):
                 for t in tickers:
-                    if t.get("symbol") == symbol:
+                    if t.get("symbol") == symbol or t.get("symbol") == symbol.replace("USDT", "_USDT"):
                         return float(t["lastPrice"])
             elif isinstance(tickers, dict):
                 return float(tickers["lastPrice"])
