@@ -75,7 +75,7 @@ async def get_usdt_balance() -> float:
 
 async def get_price(symbol: str) -> float:
     async with aiohttp.ClientSession() as s:
-        url = f"https://contract.mexc.com/api/v1/contract/ticker?symbol={symbol}"
+        url = f"https://contract.mexc.com/api/v1/contract/ticker"
         async with s.get(url) as r:
             d = await r.json()
             tickers = d.get("data", [])
