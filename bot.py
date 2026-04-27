@@ -75,15 +75,17 @@ async def get_usdt_balance() -> float:
 
 async def get_price(symbol: str) -> float:
     async with aiohttp.ClientSession() as s:
-        async with s.get(f"{BASE}/api/v1/contract/ticker", params={"symbol": symbol}) as r:
+        url = f"https://contract.mexc.com/api/v1/contract/ticker?symbol={symbol}"
+        async with s.get(url) as r:
             d = await r.json()
-            data = d.get("data", {})
-            if isinstance(data, list):
-                return float(data[0]["lastPrice"])
-            price_key = next((k for k in ["lastPrice", "last", "price", "close"] if k in data), None)
-            if not price_key:
-                raise KeyError(f"Price key not found: {list(data.keys())}")
-            return float(data[price_key])
+            tickers = d.get("data", [])
+            if isinstance(tickers, list):
+                for t in tickers:
+                    if t.get("symbol") == symbol:
+                        return float(t["lastPrice"])
+            elif isinstance(tickers, dict):
+                return float(tickers["lastPrice"])
+            raise KeyError(f"Symbol {symbol} not found in ticker")
 
 async def set_leverage(symbol: str):
     await futures_post("/api/v1/private/position/change_leverage", {
