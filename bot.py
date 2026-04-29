@@ -17,6 +17,7 @@ BOT_CONFIG = {
     "PTBUSDT_5":  {"leverage": 10, "risk": 6.0},
     "HYPEUSDT_3": {"leverage": 10, "risk": 5.0},
     "APEUSDT_3":  {"leverage": 10, "risk": 5.0},
+    "BTCUSDT": {"leverage": 1, "risk": 1},
 }
 
 open_trades = {}
