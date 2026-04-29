@@ -11,12 +11,12 @@ PORT = int(os.environ.get("PORT", 8080))
 MAX_OPEN_TRADES = 5
 
 BOT_CONFIG = {
-    ("BTCUSDT", "3"):  {"leverage": 10, "risk": 3.5},
-    ("BTCUSDT", "5"):  {"leverage": 15, "risk": 6.0},
-    ("ETHUSDT", "5"):  {"leverage": 15, "risk": 3.8},
-    ("PTBUSDT", "5"):  {"leverage": 10, "risk": 6.0},
-    ("HYPEUSDT", "3"): {"leverage": 10, "risk": 5.0},
-    ("APEUSDT", "3"):  {"leverage": 10, "risk": 5.0},
+    "BTCUSDT_3":  {"leverage": 10, "risk": 3.5},
+    "BTCUSDT_5":  {"leverage": 15, "risk": 6.0},
+    "ETHUSDT_5":  {"leverage": 15, "risk": 3.8},
+    "PTBUSDT_5":  {"leverage": 10, "risk": 6.0},
+    "HYPEUSDT_3": {"leverage": 10, "risk": 5.0},
+    "APEUSDT_3":  {"leverage": 10, "risk": 5.0},
 }
 
 open_trades = {}
@@ -148,7 +148,7 @@ async def handle_signal(data):
         log.warning(f"Geçersiz price: {price}")
         return
 
-    config = BOT_CONFIG.get((symbol, timeframe))
+    config = BOT_CONFIG.get(f"{symbol}_{timeframe}")
 
     if not config:
         log.warning(f"Bu bot listede yok: {symbol} {timeframe}m")
