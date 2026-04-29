@@ -1,204 +1,211 @@
-import asyncio, json, logging, hmac, hashlib, time
-from datetime import datetime
+import os, time, json, hmac, hashlib, logging, asyncio
 from aiohttp import web
 import aiohttp
 
-import os
-MEXC_API_KEY    = os.environ.get("MEXC_API_KEY", "")
+MEXC_API_KEY = os.environ.get("MEXC_API_KEY", "")
 MEXC_SECRET_KEY = os.environ.get("MEXC_SECRET_KEY", "")
-WEBHOOK_PORT    = 8080
-WEBHOOK_SECRET  = "scalp2025"
-LEVERAGE        = 15
-MARGIN_TYPE     = "CROSSED"
-RISK_PERCENT    = 2.5
-MAX_OPEN_TRADES = 4
-
-ALLOWED = {
-    "BTCUSDT": ["1", "3", "5", "10", "15", "30", "45", "60", "120", "180", "240"],
-    "ETHUSDT": ["1", "3", "5", "10", "15", "30", "45", "60", "120", "180", "240"],
-    "SOLUSDT": ["1", "3", "5", "10", "15", "30", "45", "60", "120", "180", "240"],
-    "BNBUSDT": ["1", "3", "5", "10", "15", "30", "45", "60", "120", "180", "240"],
-}
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s %(message)s",
-    datefmt="%H:%M:%S",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("bot.log", encoding="utf-8"),
-    ],
-)
-log = logging.getLogger("ScalpBot")
-
-open_trades = []
-stats = {"wins": 0, "losses": 0, "total": 0}
 
 BASE = "https://contract.mexc.com"
+PORT = int(os.environ.get("PORT", 8080))
 
-async def futures_post(path: str, body: dict) -> dict:
+MAX_OPEN_TRADES = 5
+
+BOT_CONFIG = {
+    ("BTCUSDT", "3"):  {"leverage": 10, "risk": 3.5},
+    ("BTCUSDT", "5"):  {"leverage": 15, "risk": 6.0},
+    ("ETHUSDT", "5"):  {"leverage": 15, "risk": 3.8},
+    ("PTBUSDT", "5"):  {"leverage": 10, "risk": 6.0},
+    ("HYPEUSDT", "3"): {"leverage": 10, "risk": 5.0},
+    ("APEUSDT", "3"):  {"leverage": 10, "risk": 5.0},
+}
+
+open_trades = {}
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("MEXC-BOT-V2")
+
+
+def contract_symbol(symbol):
+    symbol = symbol.upper().replace(".P", "")
+    if symbol.endswith("USDT"):
+        return symbol.replace("USDT", "_USDT")
+    return symbol
+
+
+def sign_body(body):
     ts = str(int(time.time() * 1000))
-    sign_str = ts + MEXC_API_KEY + json.dumps(body)
+    body_str = json.dumps(body, separators=(",", ":"))
+    sign_str = MEXC_API_KEY + ts + body_str
     signature = hmac.new(MEXC_SECRET_KEY.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
+    return ts, signature
+
+
+async def mexc_post(path, body):
+    ts, signature = sign_body(body)
     headers = {
         "ApiKey": MEXC_API_KEY,
         "Request-Time": ts,
         "Signature": signature,
         "Content-Type": "application/json",
     }
-    async with aiohttp.ClientSession() as s:
-        async with s.post(BASE + path, json=body, headers=headers) as r:
-                text = await r.text()
-                print("MEXC RESPONSE:", text)
-                return json.loads(text)
 
-async def futures_get(path: str, params: dict = None) -> dict:
-    params = params or {}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(BASE + path, data=json.dumps(body, separators=(",", ":")), headers=headers) as r:
+            text = await r.text()
+            log.info(f"MEXC RESPONSE [{r.status}]: {text}")
+
+            try:
+                return json.loads(text)
+            except Exception:
+                return {"success": False, "code": "NON_JSON", "message": text[:300]}
+
+
+async def mexc_get(path):
     ts = str(int(time.time() * 1000))
-    param_str = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
-    sign_str = MEXC_API_KEY + ts + param_str
+    sign_str = MEXC_API_KEY + ts
     signature = hmac.new(MEXC_SECRET_KEY.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
+
     headers = {
         "ApiKey": MEXC_API_KEY,
         "Request-Time": ts,
         "Signature": signature,
     }
-    async with aiohttp.ClientSession() as s:
-        async with s.get(BASE + path, params=params, headers=headers) as r:
-            return await r.json()
 
-async def get_usdt_balance() -> float:
-    data = await futures_get("/api/v1/private/account/assets")
-    for asset in data.get("data", []):
-        if asset.get("currency") == "USDT":
-            return float(asset.get("availableBalance", 0))
+    async with aiohttp.ClientSession() as session:
+        async with session.get(BASE + path, headers=headers) as r:
+            text = await r.text()
+            log.info(f"MEXC GET [{r.status}]: {text}")
+
+            try:
+                return json.loads(text)
+            except Exception:
+                return {"success": False, "code": "NON_JSON", "message": text[:300]}
+
+
+async def get_balance():
+    data = await mexc_get("/api/v1/private/account/assets")
+    if not data.get("success"):
+        return 0.0
+
+    for item in data.get("data", []):
+        if item.get("currency") == "USDT":
+            return float(item.get("availableBalance", 0))
+
     return 0.0
 
-async def get_price(symbol: str) -> float:
-    async with aiohttp.ClientSession() as s:
-        url = f"https://contract.mexc.com/api/v1/contract/ticker"
-        async with s.get(url) as r:
-            d = await r.json()
-            tickers = d.get("data", [])
-            if isinstance(tickers, list):
-                for t in tickers:
-                    if t.get("symbol") == symbol or t.get("symbol") == symbol.replace("USDT", "_USDT"):
-                        return float(t["lastPrice"])
-            elif isinstance(tickers, dict):
-                return float(tickers["lastPrice"])
-            symbols_in_ticker = [t.get("symbol") for t in tickers[:5]] if isinstance(tickers, list) else tickers
-            raise KeyError(f"Symbol {symbol} not found. Available: {symbols_in_ticker}")
 
-async def set_leverage(symbol: str):
-    await futures_post("/api/v1/private/position/change_leverage", {
-        "symbol": symbol,
-        "leverage": LEVERAGE,
-        "openType": 2,
-    })
-    log.info(f"⚙️  {symbol} kaldıraç: {LEVERAGE}x Cross")
-
-async def place_futures_order(symbol, side, qty, tp, sl):
-    open_type = 1 if side == "BUY" else 3
+async def set_leverage(symbol, leverage):
     body = {
-        "symbol": symbol,
-        "price": 0,
-        "vol": qty,
-        "side": open_type,
-        "type": 5,
-        "openType": 2,
-        "leverage": LEVERAGE,
-        "stopLossPrice": round(sl, 4),
-        "takeProfitPrice": round(tp, 4),
+        "symbol": contract_symbol(symbol),
+        "leverage": leverage,
+        "openType": 2
     }
-    result = await futures_post("/api/v1/private/order/submit", body)
-    if result.get("success"):
-        log.info(f"✅ {side} açıldı — {symbol} | qty={qty} | TP={tp:.4f} | SL={sl:.4f}")
-        return result
-    else:
-        log.error(f"❌ Order hatası: {result}")
+    return await mexc_post("/api/v1/private/position/change_leverage", body)
+
+
+async def place_order(symbol, action, price, leverage, risk_percent):
+    balance = await get_balance()
+
+    if balance <= 0:
+        log.error("Bakiye 0 görünüyor. API yetkisi, futures hesabı veya whitelist kontrol edilmeli.")
         return None
 
-def is_allowed(symbol, tf):
-    if not symbol.endswith("USDT"):
-        symbol = symbol + "USDT"
-    symbol = symbol.upper()
-    if symbol not in ALLOWED:
-        log.info(f"⛔ {symbol} izin listesinde yok.")
-        return False
-    allowed_tfs = ALLOWED[symbol]
-    if allowed_tfs and tf not in allowed_tfs:
-        log.info(f"⛔ {symbol} {tf} zaman dilimi filtreli.")
-        return False
-    return True
+    margin_usdt = balance * (risk_percent / 100)
+    position_usdt = margin_usdt * leverage
+    qty = round(position_usdt / price, 3)
 
-def winrate():
-    t = stats["total"]
-    return round(stats["wins"] / t * 100, 2) if t else 0.0
+    if qty <= 0:
+        log.error(f"Qty 0 çıktı. Balance={balance}, Price={price}")
+        return None
 
-async def handle_signal(signal: dict):
-    action   = signal.get("action", "").upper()
-    raw_sym  = signal.get("symbol", "")
-    tf       = str(signal.get("timeframe", ""))
-    sl_price = float(signal.get("sl", 0))
-    tp_price = float(signal.get("tp", 0))
-    symbol = raw_sym.upper().replace(".PUSDT", "USDT").replace(".P", "")
-    if not symbol.endswith("USDT"):
-        if symbol.endswith("USD"):
-            symbol = symbol + "T"
-        else:
-            symbol = symbol + "USDT"
+    side = 1 if action == "BUY" else 3
 
-    log.info(f"📡 Sinyal → {action} {symbol} TF={tf}")
+    body = {
+        "symbol": contract_symbol(symbol),
+        "price": 0,
+        "vol": qty,
+        "side": side,
+        "type": 5,
+        "openType": 2,
+        "leverage": leverage
+    }
 
-    if not is_allowed(symbol, tf): return
-    if action not in ("BUY", "SELL"): return
+    log.info(f"ORDER → {action} {symbol} | qty={qty} | lev={leverage}x | risk=%{risk_percent}")
+    return await mexc_post("/api/v1/private/order/create", body)
+
+
+async def handle_signal(data):
+    action = str(data.get("action", "")).upper()
+    symbol = str(data.get("symbol", "")).upper().replace(".P", "")
+    timeframe = str(data.get("timeframe", ""))
+    price = float(data.get("price", 0))
+
+    if action not in ["BUY", "SELL"]:
+        log.warning(f"Geçersiz action: {action}")
+        return
+
+    if price <= 0:
+        log.warning(f"Geçersiz price: {price}")
+        return
+
+    config = BOT_CONFIG.get((symbol, timeframe))
+
+    if not config:
+        log.warning(f"Bu bot listede yok: {symbol} {timeframe}m")
+        return
+
     if len(open_trades) >= MAX_OPEN_TRADES:
-        log.info("⚠️  Max işlem doldu, atlandı."); return
-    if any(t["symbol"] == symbol for t in open_trades):
-        log.info(f"⚠️  {symbol} zaten açık."); return
+        log.warning("Max 5 açık işlem dolu, sinyal atlandı.")
+        return
 
-    balance   = await get_usdt_balance()
-    price     = await get_price(symbol)
-    risk_usdt = balance * (RISK_PERCENT / 100)
-    qty       = round((risk_usdt * LEVERAGE) / price, 3)
+    if symbol in open_trades:
+        log.warning(f"{symbol} zaten açık görünüyor, tekrar açılmadı.")
+        return
 
-    log.info(f"💰 Bakiye: {balance:.2f} | Risk: {risk_usdt:.2f} | Qty: {qty}")
+    await set_leverage(symbol, config["leverage"])
+    order = await place_order(symbol, action, price, config["leverage"], config["risk"])
 
-    await set_leverage(symbol)
-    order = await place_futures_order(symbol, action, qty, tp_price, sl_price)
-    if not order: return
+    if order and order.get("success"):
+        open_trades[symbol] = {
+            "action": action,
+            "price": price,
+            "timeframe": timeframe,
+            "leverage": config["leverage"],
+            "risk": config["risk"],
+            "time": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+        log.info(f"✅ İşlem açıldı: {symbol}")
+    else:
+        log.error(f"❌ İşlem açılamadı: {order}")
 
-    open_trades.append({
-        "symbol": symbol, "action": action,
-        "entry": price, "sl": sl_price, "tp": tp_price,
-        "qty": qty, "opened_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-    })
-    stats["total"] += 1
-    log.info(f"📊 Toplam:{stats['total']} Kazanç:{stats['wins']} Kayıp:{stats['losses']} Winrate:%{winrate()} Açık:{len(open_trades)}")
 
-async def webhook_handler(request: web.Request):
-    
+async def webhook(request):
     try:
-        body = await request.json()
-    except:
-        return web.Response(status=400, text="Bad JSON")
-    asyncio.create_task(handle_signal(body))
-    return web.json_response({"status": "ok", "winrate": winrate()})
+        data = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Bad JSON"}, status=400)
 
-async def status_handler(request: web.Request):
+    log.info(f"WEBHOOK GELDİ: {data}")
+    asyncio.create_task(handle_signal(data))
+
+    return web.json_response({"ok": True, "received": data})
+
+
+async def status(request):
     return web.json_response({
-        "acik_islemler": len(open_trades),
-        "islemler": open_trades,
-        "istatistik": stats,
-        "winrate": f"%{winrate()}",
+        "status": "running",
+        "max_open_trades": MAX_OPEN_TRADES,
+        "open_trades": open_trades,
+        "configs": BOT_CONFIG
     })
+
 
 app = web.Application()
-app.router.add_post("/webhook", webhook_handler)
-app.router.add_get("/status", status_handler)
+app.router.add_get("/", status)
+app.router.add_get("/status", status)
+app.router.add_post("/webhook", webhook)
 
 if __name__ == "__main__":
-    log.info("🤖 Scalp Pro Futures Bot başlatılıyor...")
-    log.info(f"   Kaldıraç: {LEVERAGE}x Cross | Risk: %{RISK_PERCENT} | Max: {MAX_OPEN_TRADES}")
-    web.run_app(app, port=WEBHOOK_PORT)
+    log.info("MEXC BOT V2 başlıyor...")
+    log.info(f"Max açık işlem: {MAX_OPEN_TRADES}")
+    web.run_app(app, host="0.0.0.0", port=PORT)
