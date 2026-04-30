@@ -5,6 +5,9 @@ import aiohttp
 MEXC_API_KEY = os.environ.get("MEXC_API_KEY", "")
 MEXC_SECRET_KEY = os.environ.get("MEXC_SECRET_KEY", "")
 
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
 BASE = "https://contract.mexc.com"
 PORT = int(os.environ.get("PORT", 8080))
 
@@ -39,6 +42,51 @@ def sign_body(body):
     sign_str = MEXC_API_KEY + ts + body_str
     signature = hmac.new(MEXC_SECRET_KEY.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
     return ts, signature
+
+
+async def send_telegram_signal(data):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.warning("Telegram token/chat_id eksik.")
+        return
+
+    action = str(data.get("action", "UNKNOWN")).upper()
+    symbol = str(data.get("symbol", "UNKNOWN")).upper().replace(".P", "")
+    timeframe = str(data.get("timeframe", "UNKNOWN"))
+
+    entry = data.get("entry", data.get("price", "UNKNOWN"))
+    price = data.get("price", entry)
+    sl = data.get("sl", "UNKNOWN")
+    tp = data.get("tp", "UNKNOWN")
+    rr = data.get("rr", "UNKNOWN")
+
+    text = f"""🚨 NEW SIGNAL
+
+Symbol: {symbol}
+Side: {action}
+Timeframe: {timeframe}m
+
+Entry: {entry}
+Price: {price}
+SL: {sl}
+TP: {tp}
+RR: {rr}
+
+Manual trade only until MEXC API is fixed.
+"""
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text
+            }, timeout=10) as r:
+                resp_text = await r.text()
+                log.info(f"TELEGRAM RESPONSE [{r.status}]: {resp_text}")
+
+    except Exception as e:
+        log.error(f"Telegram send error: {e}")
 
 
 async def mexc_post(path, body):
@@ -187,6 +235,7 @@ async def webhook(request):
         return web.json_response({"ok": False, "error": "Bad JSON"}, status=400)
 
     log.info(f"WEBHOOK GELDİ: {data}")
+    asyncio.create_task(send_telegram_signal(data))
     asyncio.create_task(handle_signal(data))
 
     return web.json_response({"ok": True, "received": data})
