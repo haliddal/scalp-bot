@@ -64,7 +64,7 @@ async def mexc_wait():
 
     async with mexc_lock:
         now = time.time()
-        wait_time = 1.0 - (now - last_mexc_request_time)
+        wait_time = 2.5 - (now - last_mexc_request_time)
 
         if wait_time > 0:
             await asyncio.sleep(wait_time)
