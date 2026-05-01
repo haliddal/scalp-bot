@@ -187,7 +187,7 @@ async def get_contract_info(symbol):
     if csymbol in contract_cache:
         return contract_cache[csymbol]
 
-    data = await mexc_public_get(f"/api/v1/contract/detail/{csymbol}")
+    data = await mexc_public_get(f"/api/v1/contract/detail?symbol={csymbol}")
 
     if not data.get("success"):
         log.error(f"Contract detail alınamadı: {symbol} -> {data}")
