@@ -20,17 +20,24 @@ BOT_CONFIG = {
     "PTBUSDT_5":  {"leverage": 10, "risk": 6.0},
     "HYPEUSDT_3": {"leverage": 10, "risk": 5.0},
     "APEUSDT_3":  {"leverage": 10, "risk": 5.0},
-    "BTCUSDT": {"leverage": 1, "risk": 1},
 }
 
 open_trades = {}
+
+signal_queue = asyncio.Queue()
+mexc_lock = asyncio.Lock()
+last_mexc_request_time = 0.0
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("MEXC-BOT-V2")
 
 
+def normalize_symbol(symbol):
+    return str(symbol).upper().replace(".P", "").replace("_", "")
+
+
 def contract_symbol(symbol):
-    symbol = symbol.upper().replace(".P", "")
+    symbol = normalize_symbol(symbol)
     if symbol.endswith("USDT"):
         return symbol.replace("USDT", "_USDT")
     return symbol
@@ -44,35 +51,30 @@ def sign_body(body):
     return ts, signature
 
 
-async def send_telegram_signal(data):
+def sign_get():
+    ts = str(int(time.time() * 1000))
+    sign_str = MEXC_API_KEY + ts
+    signature = hmac.new(MEXC_SECRET_KEY.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
+    return ts, signature
+
+
+async def mexc_wait():
+    global last_mexc_request_time
+
+    async with mexc_lock:
+        now = time.time()
+        wait_time = 1.0 - (now - last_mexc_request_time)
+
+        if wait_time > 0:
+            await asyncio.sleep(wait_time)
+
+        last_mexc_request_time = time.time()
+
+
+async def send_telegram_text(text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.warning("Telegram token/chat_id eksik.")
         return
-
-    action = str(data.get("action", "UNKNOWN")).upper()
-    symbol = str(data.get("symbol", "UNKNOWN")).upper().replace(".P", "")
-    timeframe = str(data.get("timeframe", "UNKNOWN"))
-
-    entry = data.get("entry", data.get("price", "UNKNOWN"))
-    price = data.get("price", entry)
-    sl = data.get("sl", "UNKNOWN")
-    tp = data.get("tp", "UNKNOWN")
-    rr = data.get("rr", "UNKNOWN")
-
-    text = f"""🚨 NEW SIGNAL
-
-Symbol: {symbol}
-Side: {action}
-Timeframe: {timeframe}m
-
-Entry: {entry}
-Price: {price}
-SL: {sl}
-TP: {tp}
-RR: {rr}
-
-Manual trade only until MEXC API is fixed.
-"""
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
@@ -89,7 +91,41 @@ Manual trade only until MEXC API is fixed.
         log.error(f"Telegram send error: {e}")
 
 
+async def send_telegram_signal(data):
+    action = str(data.get("action", "UNKNOWN")).upper()
+    symbol = normalize_symbol(data.get("symbol", "UNKNOWN"))
+    timeframe = str(data.get("timeframe", "UNKNOWN"))
+
+    entry = data.get("entry", data.get("price", "UNKNOWN"))
+    price = data.get("price", entry)
+    sl = data.get("sl", "UNKNOWN")
+    tp = data.get("tp", "UNKNOWN")
+    rr = data.get("rr", "UNKNOWN")
+    mode = data.get("mode", "")
+
+    mode_line = f"Mode: {mode}\n" if mode else ""
+
+    text = f"""🚨 NEW SIGNAL
+
+Symbol: {symbol}
+Side: {action}
+Timeframe: {timeframe}m
+{mode_line}
+Entry: {entry}
+Price: {price}
+SL: {sl}
+TP: {tp}
+RR: {rr}
+
+MEXC auto order mode is active.
+"""
+
+    await send_telegram_text(text)
+
+
 async def mexc_post(path, body):
+    await mexc_wait()
+
     ts, signature = sign_body(body)
     headers = {
         "ApiKey": MEXC_API_KEY,
@@ -101,7 +137,7 @@ async def mexc_post(path, body):
     async with aiohttp.ClientSession() as session:
         async with session.post(BASE + path, data=json.dumps(body, separators=(",", ":")), headers=headers) as r:
             text = await r.text()
-            log.info(f"MEXC RESPONSE [{r.status}]: {text}")
+            log.info(f"MEXC POST {path} [{r.status}]: {text}")
 
             try:
                 return json.loads(text)
@@ -110,10 +146,9 @@ async def mexc_post(path, body):
 
 
 async def mexc_get(path):
-    ts = str(int(time.time() * 1000))
-    sign_str = MEXC_API_KEY + ts
-    signature = hmac.new(MEXC_SECRET_KEY.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
+    await mexc_wait()
 
+    ts, signature = sign_get()
     headers = {
         "ApiKey": MEXC_API_KEY,
         "Request-Time": ts,
@@ -123,7 +158,7 @@ async def mexc_get(path):
     async with aiohttp.ClientSession() as session:
         async with session.get(BASE + path, headers=headers) as r:
             text = await r.text()
-            log.info(f"MEXC GET [{r.status}]: {text}")
+            log.info(f"MEXC GET {path} [{r.status}]: {text}")
 
             try:
                 return json.loads(text)
@@ -143,16 +178,69 @@ async def get_balance():
     return 0.0
 
 
+async def get_open_positions(symbol=None):
+    if symbol:
+        path = f"/api/v1/private/position/open_positions?symbol={contract_symbol(symbol)}"
+    else:
+        path = "/api/v1/private/position/open_positions"
+
+    data = await mexc_get(path)
+
+    if not data.get("success"):
+        return []
+
+    positions = data.get("data", [])
+    result = []
+
+    for p in positions:
+        try:
+            hold_vol = float(p.get("holdVol", 0))
+            state = int(p.get("state", 0))
+        except Exception:
+            hold_vol = 0
+            state = 0
+
+        if state == 1 and hold_vol > 0:
+            result.append(p)
+
+    return result
+
+
+async def find_position(symbol, action):
+    wanted_symbol = contract_symbol(symbol)
+    wanted_type = 1 if action == "BUY" else 2
+
+    positions = await get_open_positions(symbol)
+
+    for p in positions:
+        if p.get("symbol") == wanted_symbol and int(p.get("positionType", 0)) == wanted_type:
+            return p
+
+    return None
+
+
+async def wait_for_position(symbol, action, retries=6):
+    for _ in range(retries):
+        pos = await find_position(symbol, action)
+        if pos:
+            return pos
+        await asyncio.sleep(1.0)
+
+    return None
+
+
 async def set_leverage(symbol, leverage):
     body = {
         "symbol": contract_symbol(symbol),
         "leverage": leverage,
         "openType": 2
     }
+
+    log.info(f"LEVERAGE → {symbol} | lev={leverage}x")
     return await mexc_post("/api/v1/private/position/change_leverage", body)
 
 
-async def place_order(symbol, action, price, leverage, risk_percent):
+async def place_entry_order(symbol, action, price, leverage, risk_percent):
     balance = await get_balance()
 
     if balance <= 0:
@@ -179,53 +267,325 @@ async def place_order(symbol, action, price, leverage, risk_percent):
         "leverage": leverage
     }
 
-    log.info(f"ORDER → {action} {symbol} | qty={qty} | lev={leverage}x | risk=%{risk_percent}")
+    log.info(f"ENTRY ORDER → {action} {symbol} | qty={qty} | lev={leverage}x | risk=%{risk_percent}")
+    order = await mexc_post("/api/v1/private/order/create", body)
+
+    return {
+        "response": order,
+        "qty": qty
+    }
+
+
+async def place_tpsl(symbol, position, tp, sl):
+    position_id = position.get("positionId")
+    hold_vol = float(position.get("holdVol", 0))
+
+    if not position_id or hold_vol <= 0:
+        return {"success": False, "message": "positionId veya holdVol yok"}
+
+    body = {
+        "positionId": int(position_id),
+        "vol": hold_vol,
+
+        "stopLossPrice": float(sl),
+        "takeProfitPrice": float(tp),
+
+        "lossTrend": 1,
+        "profitTrend": 1,
+
+        "priceProtect": 0,
+        "profitLossVolType": "SAME",
+        "volType": 2,
+
+        "takeProfitReverse": 2,
+        "stopLossReverse": 2,
+
+        "takeProfitType": 0,
+        "stopLossType": 0,
+        "takeProfitOrderPrice": 0,
+        "stopLossOrderPrice": 0
+    }
+
+    log.info(f"TP/SL PLACE → {symbol} | positionId={position_id} | vol={hold_vol} | TP={tp} | SL={sl}")
+    return await mexc_post("/api/v1/private/stoporder/place", body)
+
+
+async def close_position_market(symbol, position):
+    position_id = position.get("positionId")
+    hold_vol = float(position.get("holdVol", 0))
+    position_type = int(position.get("positionType", 0))
+
+    if not position_id or hold_vol <= 0:
+        return {"success": False, "message": "Kapatılacak pozisyon bulunamadı"}
+
+    if position_type == 1:
+        close_side = 4
+    elif position_type == 2:
+        close_side = 2
+    else:
+        return {"success": False, "message": f"Geçersiz positionType: {position_type}"}
+
+    body = {
+        "symbol": contract_symbol(symbol),
+        "price": 0,
+        "vol": hold_vol,
+        "side": close_side,
+        "type": 5,
+        "openType": 2,
+        "positionId": int(position_id)
+    }
+
+    log.warning(f"EMERGENCY CLOSE → {symbol} | positionId={position_id} | vol={hold_vol} | side={close_side}")
     return await mexc_post("/api/v1/private/order/create", body)
+
+
+def parse_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return default
 
 
 async def handle_signal(data):
     action = str(data.get("action", "")).upper()
-    symbol = str(data.get("symbol", "")).upper().replace(".P", "")
+    symbol = normalize_symbol(data.get("symbol", ""))
     timeframe = str(data.get("timeframe", ""))
-    price = float(data.get("price", 0))
+
+    price = parse_float(data.get("price", data.get("entry", 0)))
+    entry = parse_float(data.get("entry", price))
+    sl = parse_float(data.get("sl", 0))
+    tp = parse_float(data.get("tp", 0))
 
     if action not in ["BUY", "SELL"]:
         log.warning(f"Geçersiz action: {action}")
         return
 
     if price <= 0:
-        log.warning(f"Geçersiz price: {price}")
+        log.warning(f"Geçersiz price/entry: {data}")
         return
+
+    if sl <= 0 or tp <= 0:
+        msg = f"""⚠️ ORDER SKIPPED
+
+Symbol: {symbol}
+Side: {action}
+Reason: TP veya SL yok.
+
+Entry: {entry}
+SL: {sl}
+TP: {tp}
+
+Güvenlik için işlem açılmadı.
+"""
+        log.warning(msg)
+        await send_telegram_text(msg)
+        return
+
+    if action == "BUY":
+        if not (sl < price < tp):
+            msg = f"""⚠️ ORDER SKIPPED
+
+Symbol: {symbol}
+Side: BUY
+Reason: TP/SL yönü hatalı.
+
+Entry: {price}
+SL: {sl}
+TP: {tp}
+
+BUY için SL entry altında, TP entry üstünde olmalı.
+"""
+            log.warning(msg)
+            await send_telegram_text(msg)
+            return
+
+    if action == "SELL":
+        if not (tp < price < sl):
+            msg = f"""⚠️ ORDER SKIPPED
+
+Symbol: {symbol}
+Side: SELL
+Reason: TP/SL yönü hatalı.
+
+Entry: {price}
+SL: {sl}
+TP: {tp}
+
+SELL için TP entry altında, SL entry üstünde olmalı.
+"""
+            log.warning(msg)
+            await send_telegram_text(msg)
+            return
 
     config = BOT_CONFIG.get(f"{symbol}_{timeframe}")
 
     if not config:
-        log.warning(f"Bu bot listede yok: {symbol} {timeframe}m")
+        msg = f"""⚠️ ORDER SKIPPED
+
+Symbol: {symbol}
+Timeframe: {timeframe}m
+Reason: BOT_CONFIG içinde bu coin/timeframe yok.
+
+Bot otomatik işlem açmadı.
+"""
+        log.warning(msg)
+        await send_telegram_text(msg)
         return
 
-    if len(open_trades) >= MAX_OPEN_TRADES:
-        log.warning("Max 5 açık işlem dolu, sinyal atlandı.")
+    all_positions = await get_open_positions()
+
+    if len(all_positions) >= MAX_OPEN_TRADES:
+        msg = f"""⚠️ ORDER SKIPPED
+
+Symbol: {symbol}
+Reason: Max {MAX_OPEN_TRADES} açık işlem dolu.
+"""
+        log.warning(msg)
+        await send_telegram_text(msg)
         return
 
-    if symbol in open_trades:
-        log.warning(f"{symbol} zaten açık görünüyor, tekrar açılmadı.")
+    existing = await find_position(symbol, action)
+
+    if existing:
+        msg = f"""⚠️ ORDER SKIPPED
+
+Symbol: {symbol}
+Side: {action}
+Reason: Bu yönde zaten açık pozisyon var.
+"""
+        log.warning(msg)
+        await send_telegram_text(msg)
         return
 
     await set_leverage(symbol, config["leverage"])
-    order = await place_order(symbol, action, price, config["leverage"], config["risk"])
 
-    if order and order.get("success"):
+    entry_result = await place_entry_order(symbol, action, price, config["leverage"], config["risk"])
+    order = entry_result.get("response") if entry_result else None
+
+    if not order or not order.get("success"):
+        msg = f"""❌ ENTRY FAILED
+
+Symbol: {symbol}
+Side: {action}
+
+MEXC response:
+{order}
+"""
+        log.error(msg)
+        await send_telegram_text(msg)
+        return
+
+    await send_telegram_text(f"""✅ ENTRY OPENED
+
+Symbol: {symbol}
+Side: {action}
+Entry: {price}
+
+Şimdi TP/SL kuruluyor...
+""")
+
+    position = await wait_for_position(symbol, action)
+
+    if not position:
+        msg = f"""🚨 WARNING
+
+Symbol: {symbol}
+Side: {action}
+
+Entry başarılı göründü ama açık pozisyon bulunamadı.
+MEXC ekranından manuel kontrol et.
+"""
+        log.error(msg)
+        await send_telegram_text(msg)
+        return
+
+    tpsl = await place_tpsl(symbol, position, tp, sl)
+
+    if tpsl and tpsl.get("success"):
         open_trades[symbol] = {
             "action": action,
             "price": price,
+            "sl": sl,
+            "tp": tp,
             "timeframe": timeframe,
             "leverage": config["leverage"],
             "risk": config["risk"],
+            "positionId": position.get("positionId"),
             "time": time.strftime("%Y-%m-%d %H:%M:%S")
         }
-        log.info(f"✅ İşlem açıldı: {symbol}")
+
+        msg = f"""✅ ORDER SAFE
+
+Symbol: {symbol}
+Side: {action}
+Timeframe: {timeframe}m
+
+Entry: {price}
+SL: {sl}
+TP: {tp}
+
+TP/SL başarıyla kuruldu.
+"""
+        log.info(msg)
+        await send_telegram_text(msg)
+        return
+
+    msg = f"""🚨 TP/SL FAILED
+
+Symbol: {symbol}
+Side: {action}
+Entry: {price}
+SL: {sl}
+TP: {tp}
+
+TP/SL kurulamadı. Pozisyon güvenlik için kapatılıyor.
+
+MEXC TP/SL response:
+{tpsl}
+"""
+    log.error(msg)
+    await send_telegram_text(msg)
+
+    close_result = await close_position_market(symbol, position)
+
+    if close_result and close_result.get("success"):
+        await send_telegram_text(f"""✅ EMERGENCY CLOSE DONE
+
+Symbol: {symbol}
+Side: {action}
+
+TP/SL kurulamadığı için pozisyon marketten kapatıldı.
+""")
     else:
-        log.error(f"❌ İşlem açılamadı: {order}")
+        await send_telegram_text(f"""🚨 EMERGENCY CLOSE FAILED
+
+Symbol: {symbol}
+Side: {action}
+
+TP/SL kurulamadı ve pozisyon otomatik kapatılamadı.
+MEXC'ye girip hemen manuel kontrol et.
+
+Close response:
+{close_result}
+""")
+
+
+async def signal_worker():
+    log.info("Signal worker başladı.")
+
+    while True:
+        data = await signal_queue.get()
+
+        try:
+            log.info(f"SIRADAKİ SİNYAL İŞLENİYOR: {data}")
+            await handle_signal(data)
+        except Exception as e:
+            log.error(f"Signal worker error: {e}")
+            await send_telegram_text(f"🚨 BOT ERROR\n\n{e}")
+        finally:
+            signal_queue.task_done()
+
+        await asyncio.sleep(1.0)
 
 
 async def webhook(request):
@@ -235,25 +595,42 @@ async def webhook(request):
         return web.json_response({"ok": False, "error": "Bad JSON"}, status=400)
 
     log.info(f"WEBHOOK GELDİ: {data}")
-    asyncio.create_task(send_telegram_signal(data))
-    asyncio.create_task(handle_signal(data))
 
-    return web.json_response({"ok": True, "received": data})
+    asyncio.create_task(send_telegram_signal(data))
+    await signal_queue.put(data)
+
+    return web.json_response({"ok": True, "queued": True, "received": data})
 
 
 async def status(request):
+    positions = await get_open_positions()
+
     return web.json_response({
         "status": "running",
         "max_open_trades": MAX_OPEN_TRADES,
-        "open_trades": open_trades,
+        "queue_size": signal_queue.qsize(),
+        "mexc_open_positions_count": len(positions),
+        "mexc_open_positions": positions,
+        "local_open_trades": open_trades,
         "configs": BOT_CONFIG
     })
+
+
+async def on_startup(app):
+    app["signal_worker"] = asyncio.create_task(signal_worker())
+
+
+async def on_cleanup(app):
+    app["signal_worker"].cancel()
 
 
 app = web.Application()
 app.router.add_get("/", status)
 app.router.add_get("/status", status)
 app.router.add_post("/webhook", webhook)
+
+app.on_startup.append(on_startup)
+app.on_cleanup.append(on_cleanup)
 
 if __name__ == "__main__":
     log.info("MEXC BOT V2 başlıyor...")
