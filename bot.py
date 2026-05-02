@@ -8,18 +8,71 @@ MEXC_SECRET_KEY = os.environ.get("MEXC_SECRET_KEY", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-BASE = "https://contract.mexc.com"
-PORT = int(os.environ.get("PORT", 8080))
+# MEXC Futures API
+BASE = "https://contract.mexc.co"
 
-MAX_OPEN_TRADES = 5
+# TradingView HTTP webhook için .env içinde PORT=80 olmalı.
+PORT = int(os.environ.get("PORT", 80))
+
+MAX_OPEN_TRADES = 9
 
 BOT_CONFIG = {
-    "BTCUSDT_3":  {"leverage": 10, "risk": 3.5},
-    "BTCUSDT_5":  {"leverage": 15, "risk": 6.0},
-    "ETHUSDT_5":  {"leverage": 15, "risk": 3.8},
-    "PTBUSDT_5":  {"leverage": 10, "risk": 6.0},
+    "BTCUSDT_3": {"leverage": 10, "risk": 5.0},
+
+    "ETHUSDT_2": {"leverage": 10, "risk": 5.0},
+    "ETHUSDT_3": {"leverage": 10, "risk": 5.0},
+
+    "XRPUSDT_5": {"leverage": 10, "risk": 5.0},
+
+    "SKYAIUSDT_3": {"leverage": 10, "risk": 2.5},
+
+    "FETUSDT_5": {"leverage": 10, "risk": 5.0},
+
     "HYPEUSDT_3": {"leverage": 10, "risk": 5.0},
-    "APEUSDT_3":  {"leverage": 10, "risk": 5.0},
+
+    "ZEREBROUSDT_1": {"leverage": 10, "risk": 5.0},
+    "ZEREBROUSDT_2": {"leverage": 10, "risk": 5.0},
+    "ZEREBROUSDT_3": {"leverage": 10, "risk": 5.0},
+
+    "AIOTUSDT_2": {"leverage": 10, "risk": 5.0},
+    "AIOTUSDT_5": {"leverage": 10, "risk": 2.5},
+    "AIOTUSDT_10": {"leverage": 10, "risk": 2.5},
+
+    "APEUSDT_1": {"leverage": 10, "risk": 5.0},
+    "APEUSDT_2": {"leverage": 10, "risk": 5.0},
+    "APEUSDT_3": {"leverage": 10, "risk": 5.0},
+
+    "LUNCUSDT_3": {"leverage": 10, "risk": 3.0},
+
+    "PIPPINUSDT_2": {"leverage": 10, "risk": 5.0},
+
+    "PENGUUSDT_3": {"leverage": 10, "risk": 5.0},
+    "PENGUUSDT_5": {"leverage": 10, "risk": 5.0},
+
+    "RAVEUSDT_2": {"leverage": 10, "risk": 5.0},
+    "RAVEUSDT_3": {"leverage": 10, "risk": 6.0},
+    "RAVEUSDT_5": {"leverage": 10, "risk": 5.0},
+
+    "AAVEUSDT_2": {"leverage": 10, "risk": 4.0},
+
+    "RLSUSDT_2": {"leverage": 10, "risk": 3.5},
+
+    "MONUSDT_1": {"leverage": 10, "risk": 5.0},
+    "MONUSDT_2": {"leverage": 10, "risk": 6.0},
+    "MONUSDT_3": {"leverage": 10, "risk": 6.0},
+
+    "NEARUSDT_2": {"leverage": 10, "risk": 5.0},
+    "NEARUSDT_3": {"leverage": 10, "risk": 3.5},
+
+    "BIOUSDT_2": {"leverage": 10, "risk": 5.0},
+    "BIOUSDT_5": {"leverage": 10, "risk": 5.0},
+
+    "AIXBTUSDT_2": {"leverage": 10, "risk": 5.0},
+    "AIXBTUSDT_3": {"leverage": 10, "risk": 6.0},
+
+    "ARBUSDT_2": {"leverage": 10, "risk": 4.0},
+
+    "DOTUSDT_5": {"leverage": 10, "risk": 7.0},
 }
 
 open_trades = {}
@@ -30,7 +83,7 @@ mexc_lock = asyncio.Lock()
 last_mexc_request_time = 0.0
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("MEXC-BOT-V2")
+log = logging.getLogger("MEXC-BOT-V3-SAFE")
 
 
 def normalize_symbol(symbol):
@@ -64,7 +117,7 @@ async def mexc_wait():
 
     async with mexc_lock:
         now = time.time()
-        wait_time = 2.5 - (now - last_mexc_request_time)
+        wait_time = 1.2 - (now - last_mexc_request_time)
 
         if wait_time > 0:
             await asyncio.sleep(wait_time)
@@ -81,10 +134,11 @@ async def send_telegram_text(text):
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": text
-            }, timeout=10) as r:
+            async with session.post(
+                url,
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+                timeout=10
+            ) as r:
                 resp_text = await r.text()
                 log.info(f"TELEGRAM RESPONSE [{r.status}]: {resp_text}")
 
@@ -150,7 +204,11 @@ async def mexc_post(path, body):
     }
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(BASE + path, data=json.dumps(body, separators=(",", ":")), headers=headers) as r:
+        async with session.post(
+            BASE + path,
+            data=json.dumps(body, separators=(",", ":")),
+            headers=headers
+        ) as r:
             text = await r.text()
             log.info(f"MEXC POST {path} [{r.status}]: {text}")
 
@@ -215,7 +273,32 @@ def format_vol(value, vol_scale):
     return round(value, vol_scale)
 
 
-async def calculate_contract_vol(symbol, price, leverage, risk_percent):
+def parse_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+async def get_balance():
+    data = await mexc_get("/api/v1/private/account/assets")
+
+    if not data.get("success"):
+        log.error(f"Bakiye alınamadı: {data}")
+        return 0.0
+
+    items = data.get("data", []) or []
+
+    for item in items:
+        if item.get("currency") == "USDT":
+            # MEXC bazen bonusu availableBalance içine dahil etmeyebilir.
+            # Bot gerçek API'nin kullanılabilir dediği bakiyeyi kullanır.
+            return float(item.get("availableBalance", 0))
+
+    return 0.0
+
+
+async def calculate_contract_vol(symbol, entry, sl, leverage, risk_percent):
     balance = await get_balance()
 
     if balance <= 0:
@@ -237,10 +320,38 @@ async def calculate_contract_vol(symbol, price, leverage, risk_percent):
         log.error(f"Geçersiz contractSize: {symbol} -> {contract_size}")
         return None
 
-    margin_usdt = balance * (risk_percent / 100)
-    position_usdt = margin_usdt * leverage
+    price_risk = abs(entry - sl)
 
-    raw_vol = position_usdt / (price * contract_size)
+    if price_risk <= 0:
+        log.error(f"SL riski 0 çıktı. Symbol={symbol}, entry={entry}, sl={sl}")
+        return None
+
+    price_risk_percent = price_risk / entry
+
+    if price_risk_percent <= 0:
+        log.error(f"price_risk_percent 0 çıktı. Symbol={symbol}, entry={entry}, sl={sl}")
+        return None
+
+    # Gerçek risk hesabı:
+    # SL olursa kayıp yaklaşık balance * risk_percent / 100 olsun.
+    target_risk_usdt = balance * (risk_percent / 100.0)
+    target_position_usdt = target_risk_usdt / price_risk_percent
+    target_margin_usdt = target_position_usdt / leverage
+
+    # Tüm bakiyeyi kilitlemesin diye maksimum margin güvenlik payı.
+    max_margin_usdt = balance * 0.92
+    max_position_usdt = max_margin_usdt * leverage
+
+    capped = False
+    position_usdt = target_position_usdt
+    margin_usdt = target_margin_usdt
+
+    if margin_usdt > max_margin_usdt:
+        capped = True
+        margin_usdt = max_margin_usdt
+        position_usdt = max_position_usdt
+
+    raw_vol = position_usdt / (entry * contract_size)
     vol = floor_to_step(raw_vol, vol_unit)
 
     if vol < min_vol:
@@ -251,83 +362,98 @@ async def calculate_contract_vol(symbol, price, leverage, risk_percent):
 
     vol = format_vol(vol, vol_scale)
 
-    est_notional = float(vol) * contract_size * price
+    est_notional = float(vol) * contract_size * entry
+    actual_margin_usdt = est_notional / leverage
+    actual_risk_usdt = est_notional * price_risk_percent
+    actual_risk_percent = (actual_risk_usdt / balance) * 100 if balance > 0 else 0
 
     log.info(
-        f"VOL CALC → {symbol} | balance={balance} | risk=%{risk_percent} | "
-        f"lev={leverage} | price={price} | contractSize={contract_size} | "
-        f"rawVol={raw_vol} | finalVol={vol} | estNotional={est_notional}"
+        f"VOL CALC REAL RISK → {symbol} | balance={balance} | riskTarget=%{risk_percent} | "
+        f"targetRiskUSDT={target_risk_usdt} | actualRiskUSDT={actual_risk_usdt} | "
+        f"actualRisk%={actual_risk_percent} | lev={leverage} | entry={entry} | sl={sl} | "
+        f"priceRisk%={price_risk_percent} | contractSize={contract_size} | "
+        f"rawVol={raw_vol} | finalVol={vol} | estNotional={est_notional} | "
+        f"margin={actual_margin_usdt} | capped={capped}"
     )
 
     return {
         "vol": vol,
         "balance": balance,
-        "margin_usdt": margin_usdt,
-        "position_usdt": position_usdt,
+        "risk_percent_target": risk_percent,
+        "target_risk_usdt": target_risk_usdt,
+        "actual_risk_usdt": actual_risk_usdt,
+        "actual_risk_percent": actual_risk_percent,
+        "margin_usdt": actual_margin_usdt,
+        "position_usdt": est_notional,
         "contract_size": contract_size,
-        "est_notional": est_notional
+        "price_risk_percent": price_risk_percent,
+        "capped_by_balance": capped,
     }
 
 
-async def get_balance():
-    data = await mexc_get("/api/v1/private/account/assets")
-    if not data.get("success"):
-        return 0.0
-
-    for item in data.get("data", []):
-        if item.get("currency") == "USDT":
-            return float(item.get("availableBalance", 0))
-
-    return 0.0
-
-
 async def get_open_positions(symbol=None):
-    if symbol:
-        path = f"/api/v1/private/position/open_positions?symbol={contract_symbol(symbol)}"
-    else:
-        path = "/api/v1/private/position/open_positions"
-
-    data = await mexc_get(path)
+    # ÖNEMLİ:
+    # MEXC bazı durumlarda open_positions?symbol=... ile signature hatası verebiliyor.
+    # O yüzden her zaman parametresiz çekiyoruz, sonra Python içinde filtreliyoruz.
+    data = await mexc_get("/api/v1/private/position/open_positions")
 
     if not data.get("success"):
+        log.error(f"Open positions alınamadı: {data}")
         return []
 
-    positions = data.get("data", [])
+    positions = data.get("data", []) or []
     result = []
+
+    wanted_symbol = contract_symbol(symbol) if symbol else None
 
     for p in positions:
         try:
             hold_vol = float(p.get("holdVol", 0))
             state = int(p.get("state", 0))
+            psymbol = p.get("symbol")
         except Exception:
             hold_vol = 0
             state = 0
+            psymbol = ""
 
         if state == 1 and hold_vol > 0:
-            result.append(p)
+            if wanted_symbol is None or psymbol == wanted_symbol:
+                result.append(p)
 
     return result
 
 
-async def find_position(symbol, action):
+async def find_position(symbol, action=None):
     wanted_symbol = contract_symbol(symbol)
-    wanted_type = 1 if action == "BUY" else 2
-
-    positions = await get_open_positions(symbol)
+    positions = await get_open_positions()
 
     for p in positions:
-        if p.get("symbol") == wanted_symbol and int(p.get("positionType", 0)) == wanted_type:
-            return p
+        if p.get("symbol") != wanted_symbol:
+            continue
+
+        if action:
+            wanted_type = 1 if action == "BUY" else 2
+            try:
+                if int(p.get("positionType", 0)) != wanted_type:
+                    continue
+            except Exception:
+                continue
+
+        return p
 
     return None
 
 
-async def wait_for_position(symbol, action, retries=8):
-    for _ in range(retries):
+async def wait_for_position(symbol, action, retries=20, delay=1.0):
+    for i in range(retries):
         pos = await find_position(symbol, action)
+
         if pos:
+            log.info(f"Pozisyon bulundu. Deneme={i + 1}/{retries} Symbol={symbol} Action={action} Pos={pos}")
             return pos
-        await asyncio.sleep(1.0)
+
+        log.info(f"Pozisyon bekleniyor... Deneme={i + 1}/{retries} Symbol={symbol} Action={action}")
+        await asyncio.sleep(delay)
 
     return None
 
@@ -343,8 +469,8 @@ async def set_leverage(symbol, leverage):
     return await mexc_post("/api/v1/private/position/change_leverage", body)
 
 
-async def place_entry_order(symbol, action, price, leverage, risk_percent):
-    vol_info = await calculate_contract_vol(symbol, price, leverage, risk_percent)
+async def place_entry_order(symbol, action, entry, sl, tp, leverage, risk_percent):
+    vol_info = await calculate_contract_vol(symbol, entry, sl, leverage, risk_percent)
 
     if not vol_info:
         return None
@@ -352,9 +478,12 @@ async def place_entry_order(symbol, action, price, leverage, risk_percent):
     vol = vol_info["vol"]
 
     if float(vol) <= 0:
-        log.error(f"Vol 0 çıktı. Symbol={symbol}, Price={price}, vol_info={vol_info}")
+        log.error(f"Vol 0 çıktı. Symbol={symbol}, Entry={entry}, vol_info={vol_info}")
         return None
 
+    # MEXC Futures side:
+    # 1 = open long
+    # 3 = open short
     side = 1 if action == "BUY" else 3
 
     body = {
@@ -364,19 +493,25 @@ async def place_entry_order(symbol, action, price, leverage, risk_percent):
         "side": side,
         "type": 5,
         "openType": 2,
-        "leverage": leverage
+        "leverage": leverage,
+
+        # TP/SL'yi entry order ile birlikte göndermeyi deniyoruz.
+        # MEXC kabul ederse daha entry açılırken TP/SL bağlanır.
+        "presetTakeProfitPrice": float(tp),
+        "presetStopLossPrice": float(sl),
     }
 
     log.info(
-        f"ENTRY ORDER → {action} {symbol} | vol={vol} | "
-        f"lev={leverage}x | risk=%{risk_percent}"
+        f"ENTRY ORDER WITH PRESET TP/SL → {action} {symbol} | vol={vol} | "
+        f"lev={leverage}x | risk=%{risk_percent} | SL={sl} | TP={tp}"
     )
 
     order = await mexc_post("/api/v1/private/order/create", body)
 
     return {
         "response": order,
-        "vol_info": vol_info
+        "vol_info": vol_info,
+        "order_body": body,
     }
 
 
@@ -410,7 +545,7 @@ async def place_tpsl(symbol, position, tp, sl):
         "stopLossOrderPrice": 0
     }
 
-    log.info(f"TP/SL PLACE → {symbol} | positionId={position_id} | vol={hold_vol} | TP={tp} | SL={sl}")
+    log.info(f"TP/SL PLACE VERIFY → {symbol} | positionId={position_id} | vol={hold_vol} | TP={tp} | SL={sl}")
     return await mexc_post("/api/v1/private/stoporder/place", body)
 
 
@@ -441,13 +576,6 @@ async def close_position_market(symbol, position):
 
     log.warning(f"EMERGENCY CLOSE → {symbol} | positionId={position_id} | vol={hold_vol} | side={close_side}")
     return await mexc_post("/api/v1/private/order/create", body)
-
-
-def parse_float(value, default=0.0):
-    try:
-        return float(value)
-    except Exception:
-        return default
 
 
 async def handle_signal(data):
@@ -521,7 +649,8 @@ SELL için TP entry altında, SL entry üstünde olmalı.
             await send_telegram_text(msg)
             return
 
-    config = BOT_CONFIG.get(f"{symbol}_{timeframe}")
+    config_key = f"{symbol}_{timeframe}"
+    config = BOT_CONFIG.get(config_key)
 
     if not config:
         msg = f"""⚠️ ORDER SKIPPED
@@ -537,25 +666,32 @@ Bot otomatik işlem açmadı.
         return
 
     all_positions = await get_open_positions()
+    all_positions = all_positions or []
 
     if len(all_positions) >= MAX_OPEN_TRADES:
         msg = f"""⚠️ ORDER SKIPPED
 
 Symbol: {symbol}
 Reason: Max {MAX_OPEN_TRADES} açık işlem dolu.
+
+Current open positions: {len(all_positions)}
 """
         log.warning(msg)
         await send_telegram_text(msg)
         return
 
-    existing_same_side = await find_position(symbol, action)
+    # Aynı coinde long/short fark etmeden açık pozisyon varsa yeni işlem açma.
+    existing_symbol_position = await find_position(symbol)
 
-    if existing_same_side:
+    if existing_symbol_position:
         msg = f"""⚠️ ORDER SKIPPED
 
 Symbol: {symbol}
 Side: {action}
-Reason: Bu yönde zaten açık pozisyon var.
+Reason: Bu coinde zaten açık pozisyon var.
+
+Mevcut position:
+{existing_symbol_position}
 """
         log.warning(msg)
         await send_telegram_text(msg)
@@ -563,21 +699,35 @@ Reason: Bu yönde zaten açık pozisyon var.
 
     await set_leverage(symbol, config["leverage"])
 
-    entry_result = await place_entry_order(symbol, action, price, config["leverage"], config["risk"])
+    entry_result = await place_entry_order(
+        symbol=symbol,
+        action=action,
+        entry=price,
+        sl=sl,
+        tp=tp,
+        leverage=config["leverage"],
+        risk_percent=config["risk"]
+    )
+
     order = entry_result.get("response") if entry_result else None
     vol_info = entry_result.get("vol_info") if entry_result else None
+    order_body = entry_result.get("order_body") if entry_result else None
 
     if not order or not order.get("success"):
         msg = f"""❌ ENTRY FAILED
 
 Symbol: {symbol}
 Side: {action}
+Timeframe: {timeframe}m
 
 MEXC response:
 {order}
 
 Vol info:
 {vol_info}
+
+Order body:
+{order_body}
 """
         log.error(msg)
         await send_telegram_text(msg)
@@ -587,29 +737,39 @@ Vol info:
 
 Symbol: {symbol}
 Side: {action}
+Timeframe: {timeframe}m
 Entry: {price}
+SL: {sl}
+TP: {tp}
 
 Vol info:
 {vol_info}
 
-Şimdi TP/SL kuruluyor...
+TP/SL entry order içinde gönderildi.
+Şimdi pozisyon bulunup TP/SL güvenliği doğrulanacak...
 """)
 
-    position = await wait_for_position(symbol, action)
+    position = await wait_for_position(symbol, action, retries=20, delay=1.0)
 
     if not position:
         msg = f"""🚨 WARNING
 
 Symbol: {symbol}
 Side: {action}
+Timeframe: {timeframe}m
 
 Entry başarılı göründü ama açık pozisyon bulunamadı.
+TP/SL güvenliği doğrulanamadı.
+
 MEXC ekranından manuel kontrol et.
+ORDER SAFE gelmediği için işlem güvenli sayılmaz.
 """
         log.error(msg)
         await send_telegram_text(msg)
         return
 
+    # Entry içinde preset TP/SL gönderdik.
+    # Yine de güvenlik için pozisyon üzerinden TP/SL kurmayı/garantilemeyi deniyoruz.
     tpsl = await place_tpsl(symbol, position, tp, sl)
 
     if tpsl and tpsl.get("success"):
@@ -635,7 +795,11 @@ Entry: {price}
 SL: {sl}
 TP: {tp}
 
+Risk target: %{config["risk"]}
+Leverage: {config["leverage"]}x
+
 TP/SL başarıyla kuruldu.
+İşlem güvenli sayıldı.
 """
         log.info(msg)
         await send_telegram_text(msg)
@@ -645,11 +809,14 @@ TP/SL başarıyla kuruldu.
 
 Symbol: {symbol}
 Side: {action}
+Timeframe: {timeframe}m
+
 Entry: {price}
 SL: {sl}
 TP: {tp}
 
-TP/SL kurulamadı. Pozisyon güvenlik için kapatılıyor.
+TP/SL kurulamadı.
+Pozisyon güvenlik için marketten kapatılıyor.
 
 MEXC TP/SL response:
 {tpsl}
@@ -664,6 +831,7 @@ MEXC TP/SL response:
 
 Symbol: {symbol}
 Side: {action}
+Timeframe: {timeframe}m
 
 TP/SL kurulamadığı için pozisyon marketten kapatıldı.
 """)
@@ -672,6 +840,7 @@ TP/SL kurulamadığı için pozisyon marketten kapatıldı.
 
 Symbol: {symbol}
 Side: {action}
+Timeframe: {timeframe}m
 
 TP/SL kurulamadı ve pozisyon otomatik kapatılamadı.
 MEXC'ye girip hemen manuel kontrol et.
@@ -715,9 +884,15 @@ async def webhook(request):
 
 async def status(request):
     positions = await get_open_positions()
+    positions = positions or []
+
+    balance = await get_balance()
 
     return web.json_response({
         "status": "running",
+        "bot_version": "MEXC-BOT-V3-SAFE",
+        "base": BASE,
+        "balance_available_usdt": balance,
         "max_open_trades": MAX_OPEN_TRADES,
         "queue_size": signal_queue.qsize(),
         "mexc_open_positions_count": len(positions),
@@ -745,6 +920,7 @@ app.on_startup.append(on_startup)
 app.on_cleanup.append(on_cleanup)
 
 if __name__ == "__main__":
-    log.info("MEXC BOT V2 başlıyor...")
+    log.info("MEXC BOT V3 SAFE başlıyor...")
+    log.info(f"BASE: {BASE}")
     log.info(f"Max açık işlem: {MAX_OPEN_TRADES}")
     web.run_app(app, host="0.0.0.0", port=PORT)
